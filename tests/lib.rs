@@ -27,7 +27,7 @@ fn test1_basic_usage() {
             out.finish(format_args!("[{}] {}", record.level(), msg))
         })
         // Only log messages Info and above
-        .level(log::LogLevelFilter::Info)
+        .level(log::LevelFilter::Info)
         // Output to stdout and the log file in the temporary directory we made above to test
         .chain(io::stdout())
         .chain(fern::log_file(log_file).expect("Failed to open log file"))
@@ -40,8 +40,8 @@ fn test1_basic_usage() {
     warn!("Test warning message");
     error!("Test error message");
 
-    // shutdown the logger, to ensure all File objects are dropped and OS buffers are flushed.
-    log::shutdown_logger().expect("Failed to shutdown logger");
+    // ensure all File objects are dropped and OS buffers are flushed.
+    log::logger().flush();
 
     {
         let result = {
@@ -97,8 +97,8 @@ fn test2_line_seps() {
     info!("message1");
     info!("message2");
 
-    // shutdown the logger, to ensure all File objects are dropped and OS buffers are flushed.
-    log::shutdown_logger().expect("Failed to shutdown logger");
+    // ensure all File objects are dropped and OS buffers are flushed.
+    log::logger().flush();
 
     {
         let result = {
@@ -131,7 +131,7 @@ fn test3_channel_logging() {
     info!("message1");
     info!("message2");
 
-    log::shutdown_logger().expect("Failed to shutdown logger");
+    log::logger().flush();
 
     assert_eq!(recv.recv().unwrap(), "message1\n");
     assert_eq!(recv.recv().unwrap(), "message2\n");

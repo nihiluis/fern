@@ -12,13 +12,13 @@ use {FernLog, Filter, Formatter};
 
 pub enum LevelConfiguration {
     JustDefault,
-    Minimal(Vec<(Cow<'static, str>, log::LogLevelFilter)>),
-    Many(HashMap<Cow<'static, str>, log::LogLevelFilter>),
+    Minimal(Vec<(Cow<'static, str>, log::LevelFilter)>),
+    Many(HashMap<Cow<'static, str>, log::LevelFilter>),
 }
 
 pub struct Dispatch {
     pub output: Vec<Output>,
-    pub default_level: log::LogLevelFilter,
+    pub default_level: log::LevelFilter,
     pub levels: LevelConfiguration,
     pub format: Option<Box<Formatter>>,
     pub filters: Vec<Box<Filter>>,
@@ -43,7 +43,7 @@ pub struct Dispatch {
 #[must_use = "format callback must be used for log to process correctly"]
 pub struct FormatCallback<'a>(InnerFormatCallback<'a>);
 
-struct InnerFormatCallback<'a>(&'a mut bool, &'a Dispatch, &'a log::LogRecord<'a>);
+struct InnerFormatCallback<'a>(&'a mut bool, &'a Dispatch, &'a log::Record<'a>);
 
 pub enum Output {
     Stdout(Stdout),
@@ -77,8 +77,8 @@ pub struct Sender {
 
 pub struct Null;
 
-impl From<Vec<(Cow<'static, str>, log::LogLevelFilter)>> for LevelConfiguration {
-    fn from(mut levels: Vec<(Cow<'static, str>, log::LogLevelFilter)>) -> Self {
+impl From<Vec<(Cow<'static, str>, log::LevelFilter)>> for LevelConfiguration {
+    fn from(mut levels: Vec<(Cow<'static, str>, log::LevelFilter)>) -> Self {
         // Benchmarked separately: https://gist.github.com/daboross/976978d8200caf86e02acb6805961195
         // Use Vec if there are fewer than 15 items, HashMap if there are more than 15.
         match levels.len() {
@@ -95,7 +95,7 @@ impl From<Vec<(Cow<'static, str>, log::LogLevelFilter)>> for LevelConfiguration 
 impl LevelConfiguration {
     // inline since we use it literally once.
     #[inline]
-    fn find_module(&self, module: &str) -> Option<log::LogLevelFilter> {
+    fn find_module(&self, module: &str) -> Option<log::LevelFilter> {
         match *self {
             LevelConfiguration::JustDefault => None,
             _ => {
@@ -128,7 +128,7 @@ impl LevelConfiguration {
         }
     }
 
-    fn find_exact(&self, module: &str) -> Option<log::LogLevelFilter> {
+    fn find_exact(&self, module: &str) -> Option<log::LevelFilter> {
         match *self {
             LevelConfiguration::JustDefault => None,
             LevelConfiguration::Minimal(ref levels) => levels
@@ -141,7 +141,7 @@ impl LevelConfiguration {
 }
 
 impl FernLog for Output {
-    fn log_args(&self, input: &fmt::Arguments, record: &log::LogRecord) {
+    fn log_args(&self, input: &fmt::Arguments, record: &log::Record) {
         match *self {
             Output::Stdout(ref s) => s.log_args(input, record),
             Output::Stderr(ref s) => s.log_args(input, record),
@@ -152,31 +152,49 @@ impl FernLog for Output {
             Output::Other(ref s) => s.log_args(input, record),
         }
     }
+
+    fn flush(&self) {
+        match *self {
+            Output::Stdout(ref s) => <Stdout as FernLog>::flush(&s),
+            Output::Stderr(ref s) => <Stderr as FernLog>::flush(&s),
+            Output::File(ref s) => <File as FernLog>::flush(&s),
+            Output::Sender(ref s) => <Sender as FernLog>::flush(&s),
+            Output::Dispatch(ref s) => <Dispatch as FernLog>::flush(&s),
+            Output::SharedDispatch(ref s) => <Dispatch as FernLog>::flush(&s),
+            Output::Other(ref s) => s.flush(),
+        }
+    }
 }
 
 impl log::Log for Dispatch {
-    fn enabled(&self, metadata: &log::LogMetadata) -> bool {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
         metadata.level()
             <= self.levels
                 .find_module(metadata.target())
                 .unwrap_or(self.default_level) && self.filters.iter().all(|f| f(metadata))
     }
 
-    fn log(&self, record: &log::LogRecord) {
+    fn log(&self, record: &log::Record) {
         self.log_args(record.args(), record)
+    }
+
+    fn flush(&self) {
+        <Self as FernLog>::flush(self)
     }
 }
 
 impl log::Log for Null {
-    fn enabled(&self, _: &log::LogMetadata) -> bool {
+    fn enabled(&self, _: &log::Metadata) -> bool {
         false
     }
 
-    fn log(&self, _: &log::LogRecord) {}
+    fn log(&self, _: &log::Record) {}
+
+    fn flush(&self) {}
 }
 
 impl FernLog for Dispatch {
-    fn log_args(&self, message: &fmt::Arguments, record: &log::LogRecord) {
+    fn log_args(&self, message: &fmt::Arguments, record: &log::Record) {
         if self.enabled(record.metadata()) {
             match self.format {
                 Some(ref format) => {
@@ -199,10 +217,16 @@ impl FernLog for Dispatch {
             }
         }
     }
+
+    fn flush(&self) {
+        for log in &self.output {
+            log.flush();
+        }
+    }
 }
 
 impl Dispatch {
-    fn finish_logging(&self, formatted_message: &fmt::Arguments, record: &log::LogRecord) {
+    fn finish_logging(&self, formatted_message: &fmt::Arguments, record: &log::Record) {
         for log in &self.output {
             log.log_args(formatted_message, record);
         }
@@ -242,11 +266,15 @@ impl<'a> FormatCallback<'a> {
 macro_rules! std_log_impl {
     ($ident:ident) => {
         impl FernLog for $ident {
-            fn log_args(&self, payload: &fmt::Arguments, record: &log::LogRecord) {
+            fn log_args(&self, payload: &fmt::Arguments, record: &log::Record) {
                 fallback_on_error(payload, record, |payload, _| {
                     write!(self.stream.lock(), "{}{}", payload, self.line_sep)?;
                     Ok(())
                 });
+            }
+
+            fn flush(&self) {
+                let _ = self.stream.lock().flush();
             }
         }
     };
@@ -256,7 +284,7 @@ std_log_impl!(Stdout);
 std_log_impl!(Stderr);
 
 impl FernLog for File {
-    fn log_args(&self, payload: &fmt::Arguments, record: &log::LogRecord) {
+    fn log_args(&self, payload: &fmt::Arguments, record: &log::Record) {
         fallback_on_error(payload, record, |payload, _| {
             let mut writer = self.stream.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -267,10 +295,17 @@ impl FernLog for File {
             Ok(())
         });
     }
+
+    fn flush(&self) {
+        let _ = self.stream
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .flush();
+    }
 }
 
 impl FernLog for Sender {
-    fn log_args(&self, payload: &fmt::Arguments, record: &log::LogRecord) {
+    fn log_args(&self, payload: &fmt::Arguments, record: &log::Record) {
         fallback_on_error(payload, record, |payload, _| {
             let msg = format!("{}{}", payload, self.line_sep);
             self.stream
@@ -283,24 +318,26 @@ impl FernLog for Sender {
 }
 
 #[inline(always)]
-fn fallback_on_error<F>(payload: &fmt::Arguments, record: &log::LogRecord, log_func: F)
+fn fallback_on_error<F>(payload: &fmt::Arguments, record: &log::Record, log_func: F)
 where
-    F: FnOnce(&fmt::Arguments, &log::LogRecord) -> Result<(), LogError>,
+    F: FnOnce(&fmt::Arguments, &log::Record) -> Result<(), LogError>,
 {
     if let Err(error) = log_func(payload, record) {
         backup_logging(payload, record, &error)
     }
 }
 
-fn backup_logging(payload: &fmt::Arguments, record: &log::LogRecord, error: &LogError) {
+fn backup_logging(payload: &fmt::Arguments, record: &log::Record, error: &LogError) {
     let second = write!(
         io::stderr(),
         "Error performing logging.\
          \n\tattempted to log: {}\
-         \n\torigin location: {:#?}\
+         \n\torigin location: {} ({}:{})\
          \n\tlogging error: {}",
         payload,
-        record.location(),
+        record.module_path(),
+        record.file(),
+        record.line(),
         error
     );
 
@@ -308,11 +345,13 @@ fn backup_logging(payload: &fmt::Arguments, record: &log::LogRecord, error: &Log
         panic!(
             "Error performing stderr logging after error occurred during regular logging.\
              \n\tattempted to log: {}\
-             \n\torigin location: {:#?}\
+             \n\torigin location: {} ({}:{})\
              \n\tfirst logging Error: {}\
              \n\tstderr error: {}",
             payload,
-            record.location(),
+            record.module_path(),
+            record.file(),
+            record.line(),
             error,
             second_error
         );
@@ -349,7 +388,7 @@ impl From<mpsc::SendError<String>> for LogError {
 #[cfg(test)]
 mod test {
     use super::LevelConfiguration;
-    use log::LogLevelFilter::*;
+    use log::LevelFilter::*;
 
     #[test]
     fn test_level_config_find_exact_minimal() {
